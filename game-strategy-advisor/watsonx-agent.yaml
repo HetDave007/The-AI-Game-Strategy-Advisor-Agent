@@ -1,0 +1,171 @@
+# =============================================================================
+# watsonx-agent.yaml
+# Game Strategy Advisor — Multi-Agent Definition for watsonx Orchestrate
+# =============================================================================
+#
+# Usage:
+#   1. Install the watsonx Orchestrate CLI:
+#        pip install ibm-watsonx-orchestrate
+#   2. Authenticate:
+#        orchestrate login --apikey $WATSONX_API_KEY --instance-url $WATSONX_URL
+#   3. Import this file:
+#        orchestrate agents import -f watsonx-agent.yaml
+#
+# Free-trial note:
+#   The tools defined here call our LOCAL FastMCP server via stdio/SSE.
+#   No external compute is consumed unless you explicitly set llm.model_id
+#   to a paid endpoint.  The default ibm/granite-3-8b-instruct is available
+#   on the free tier.
+# =============================================================================
+
+spec_version: "1.0"
+
+# ---------------------------------------------------------------------------
+# Shared LLM configuration — IBM Granite (free tier)
+# ---------------------------------------------------------------------------
+llm_defaults: &llm_defaults
+  provider: watsonx
+  model_id: ibm/granite-3-8b-instruct          # lightweight, free-tier eligible
+  parameters:
+    max_new_tokens: 512
+    temperature: 0.2
+    top_p: 0.9
+    decoding_method: greedy
+
+# ---------------------------------------------------------------------------
+# MCP Server registration
+# ---------------------------------------------------------------------------
+mcp_servers:
+  - id: game_strategy_mcp
+    name: "Game Strategy Advisor MCP Server"
+    description: >
+      Local FastMCP server exposing three sports analytics tools:
+      match history retrieval, opponent strategy detection, and
+      formation recommendation.
+    transport: stdio                            # switch to "sse" for remote deploy
+    command: python
+    args:
+      - mcp_server.py
+    working_directory: "."                     # adjust to absolute path in production
+    tools:
+      - name: analyze_match_history
+        description: >
+          RAG-simulation tool. Returns the last 5 matches and tactical
+          profile (formation, possession, press intensity) for a given team.
+        input_schema:
+          type: object
+          properties:
+            team_name:
+              type: string
+              description: "Name of the team to scout (e.g. 'Red Lions')"
+          required: [team_name]
+
+      - name: detect_opponent_strategy
+        description: >
+          Analyses match history to detect exploitable tactical weaknesses
+          such as vulnerability to counter-attacks or high-press situations.
+        input_schema:
+          type: object
+          properties:
+            team_name:
+              type: string
+              description: "Name of the opponent to analyse"
+          required: [team_name]
+
+      - name: recommend_tactics
+        description: >
+          Recommends the optimal formation and key tactical instructions
+          based on the opponent's detected weaknesses.
+        input_schema:
+          type: object
+          properties:
+            team_name:
+              type: string
+              description: "Name of the opponent you will face"
+          required: [team_name]
+
+# ---------------------------------------------------------------------------
+# Agent definitions
+# ---------------------------------------------------------------------------
+agents:
+
+  # --- Agent 1: Scout Agent ---------------------------------------------------
+  - id: scout_agent
+    name: "Scout Agent"
+    description: >
+      Retrieves and summarises historical match data for a target opponent.
+      Designed to run first in the pipeline.
+    <<: *llm_defaults
+    system_prompt: |
+      You are an elite football scout. Your role is to retrieve match history
+      for a given team and present it clearly. Always call analyze_match_history
+      first. Summarise findings in bullet points. Be concise.
+    tools:
+      - server: game_strategy_mcp
+        tool: analyze_match_history
+    output_key: scout_report
+
+  # --- Agent 2: Analyst Agent -------------------------------------------------
+  - id: analyst_agent
+    name: "Analyst Agent"
+    description: >
+      Detects tactical weaknesses and threat level from the scout report.
+      Runs after the Scout Agent.
+    <<: *llm_defaults
+    system_prompt: |
+      You are a tactical football analyst. Given an opponent's match history
+      summary, call detect_opponent_strategy and produce a structured weakness
+      analysis. Rank weaknesses by exploitability. Be precise and data-driven.
+    tools:
+      - server: game_strategy_mcp
+        tool: detect_opponent_strategy
+    input_key: scout_report
+    output_key: analysis_report
+
+  # --- Agent 3: Tactics Engine Agent ------------------------------------------
+  - id: tactics_agent
+    name: "Tactics Engine Agent"
+    description: >
+      Recommends the optimal formation and tactical plan based on analysis.
+      Final agent in the pipeline.
+    <<: *llm_defaults
+    system_prompt: |
+      You are a head coach AI. Given a weakness analysis report, call
+      recommend_tactics to produce a complete game plan. Present the recommended
+      formation, key instructions, and a plain-English coaching summary.
+      Use confident, motivational language.
+    tools:
+      - server: game_strategy_mcp
+        tool: recommend_tactics
+    input_key: analysis_report
+    output_key: tactics_report
+
+  # --- Agent 4: Orchestrator Agent --------------------------------------------
+  - id: orchestrator_agent
+    name: "Strategy Orchestrator"
+    description: >
+      Top-level orchestrator that coordinates Scout → Analyst → Tactics in
+      sequence and returns the consolidated scouting report to the user.
+    <<: *llm_defaults
+    orchestration_mode: sequential              # agents run in declared order
+    system_prompt: |
+      You are the head of a multi-agent football strategy system. Coordinate
+      the Scout, Analyst, and Tactics Engine agents in sequence. Collect all
+      outputs and produce a single comprehensive scouting report. Always
+      address the user as "Coach".
+    sub_agents:
+      - scout_agent
+      - analyst_agent
+      - tactics_agent
+    output_key: final_report
+
+# ---------------------------------------------------------------------------
+# Workflow — entry point
+# ---------------------------------------------------------------------------
+workflow:
+  entry_agent: orchestrator_agent
+  user_input_key: opponent_team_name
+  final_output_key: final_report
+  description: >
+    Accepts an opponent team name and runs the full Scout → Analyse →
+    Recommend pipeline, returning a complete tactical game plan.
